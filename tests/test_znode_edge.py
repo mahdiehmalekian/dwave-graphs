@@ -17,9 +17,10 @@ import unittest
 
 from parameterized import parameterized
 
-from dwave.graphs.topologies.common import EdgeKind, NodeKind, _Infinite, _Quotient
+from dwave.graphs.topologies.common import CoordKind, EdgeKind, NodeKind, _Infinite, _Quotient
 from dwave.graphs.topologies.zephyr import (ZephyrCartesianCoord, ZephyrCoord, ZephyrEdge,
-                                            ZephyrNode, ZephyrPlaneShift, ZephyrShape)
+                                            ZephyrNode, ZephyrPlaneShift, ZephyrShape,
+                                            zephyr_coordinates)
 
 
 class TestZephyrEdge(unittest.TestCase):
@@ -52,6 +53,49 @@ class TestZephyrEdge(unittest.TestCase):
     def test_invalid_input_raises_error(self, invalid_edge, expected_err):
         with self.assertRaises(expected_err):
             ZephyrEdge(*invalid_edge)
+
+    def test_explicit_edge_kind_argument_is_honoured(self) -> None:
+        node = ZephyrNode((0, 1))
+        neighbor = next(iter(node.neighbors()))
+        edge = ZephyrEdge(node, neighbor, check_edge_valid=False, edge_kind=EdgeKind.ODD)
+        self.assertIs(edge.edge_kind, EdgeKind.ODD)
+
+    def test_canonical_order(self) -> None:
+        hi, lo = ZephyrNode((0, 3)), ZephyrNode((0, 1))
+        edge = ZephyrEdge(hi, lo)
+        self.assertLess(edge[0], edge[1])
+        self.assertEqual(edge[0], lo)
+        self.assertEqual(edge[1], hi)
+
+    def test_eq(self) -> None:
+        e1 = ZephyrEdge(ZephyrNode((0, 1)), ZephyrNode((0, 3)))
+        e2 = ZephyrEdge(ZephyrNode((0, 3)), ZephyrNode((0, 1)))
+        e3 = ZephyrEdge(ZephyrNode((0, 1)), ZephyrNode((1, 0)))
+        self.assertEqual(e1, e2)
+        self.assertNotEqual(e1, e3)
+
+    def test_eq_non_edge(self) -> None:
+        self.assertNotEqual(ZephyrEdge(ZephyrNode((0, 1)), ZephyrNode((0, 3))), 5)
+
+    def test_str_repr(self) -> None:
+        edge = ZephyrEdge(ZephyrNode((0, 1)), ZephyrNode((0, 3)))
+        self.assertIsInstance(str(edge), str)
+        self.assertIn("ZephyrEdge", repr(edge))
+
+    @parameterized.expand([((5, 2), ZephyrShape(6)), ((1, 2, 0), ZephyrShape(4, 4))])
+    def test_propagated_edge_kind_matches_validated_edge(self, coord, shape) -> None:
+        node = ZephyrNode(coord, shape)
+        edges = list(node.incident_edges())
+        self.assertTrue(edges)
+        for edge in edges:
+            self.assertIs(edge.edge_kind, ZephyrEdge(edge[0], edge[1]).edge_kind)
+            self.assertIsInstance(edge.edge_kind, EdgeKind)
+
+    def test_incident_edges_kind_filter_agrees_with_propagated_kind(self) -> None:
+        node = ZephyrNode((5, 2), ZephyrShape(6))
+        for kind in (EdgeKind.INTERNAL, EdgeKind.EXTERNAL, EdgeKind.ODD):
+            edges = list(node.incident_edges(nbr_kind=kind))
+            self.assertTrue(all(edge.edge_kind is kind for edge in edges))
 
 
 U_VALS = [0, 1]
@@ -237,10 +281,30 @@ class TestZephyrNode(unittest.TestCase):
         }
         self.assertEqual(set(ZephyrNode((x, y, k), ZephyrShape(t=t)).neighbors()), expected_nbrs)
 
-    def test_zcoord(self) -> None:
-        ZephyrNode((11, 12, 4), ZephyrShape(t=6)).zcoord == ZephyrCoord(1, 0, 4, 0, 2)
-        ZephyrNode((1, 0)).zcoord == ZephyrCoord(1, 0, _Quotient.QUOTIENT, 0, 0)
-        ZephyrNode((0, 1)).zcoord == ZephyrCoord(0, 0, _Quotient.QUOTIENT, 0, 0)
+    @parameterized.expand(
+        [
+            (((11, 12, 4), ZephyrShape(t=6)), ZephyrCoord(1, 6, 4, 1, 2)),
+            (((1, 0), None), ZephyrCoord(1, 0, _Quotient.QUOTIENT, 0, 0)),
+            (((0, 1), None), ZephyrCoord(0, 0, _Quotient.QUOTIENT, 0, 0)),
+        ]
+    )
+    def test_zcoord(self, node_args, expected) -> None:
+        coord, shape = node_args
+        self.assertEqual(ZephyrNode(coord, shape).zcoord, expected)
+
+    @parameterized.expand(
+        [
+            ((11, 12, 4), ZephyrShape(t=6)),
+            ((1, 0), None),
+            ((0, 1), None),
+            ((5, 2, 1), ZephyrShape(6, 4)),
+        ]
+    )
+    def test_zcoord_round_trips_through_ccoord(self, coord, shape) -> None:
+        node = ZephyrNode(coord, shape)
+        self.assertEqual(
+            zephyr_coordinates.zephyr_to_cartesian(node.zcoord), node.ccoord.to_tuple()
+        )
 
     @parameterized.expand(
         [
@@ -292,6 +356,23 @@ class TestZephyrNode(unittest.TestCase):
     def test_neighbor_kind(self, zn1, nbr_kind) -> None:
         zn0 = ZephyrNode((0, 1))
         self.assertIs(zn0.neighbor_edge_kind(zn1), nbr_kind)
+
+    @parameterized.expand(
+        [
+            ("not a node",),
+            (5,),
+            (None,),
+            (ZephyrCartesianCoord(0, 1, 0),),
+        ]
+    )
+    def test_neighbor_kind_type_mismatch_raises(self, other) -> None:
+        with self.assertRaises(TypeError):
+            ZephyrNode((0, 1)).neighbor_edge_kind(other)
+
+    def test_neighbor_kind_always_returns_edge_kind(self) -> None:
+        zn0 = ZephyrNode((0, 1))
+        for zn1 in (ZephyrNode((1, 0)), ZephyrNode((0, 7))):
+            self.assertIsInstance(zn0.neighbor_edge_kind(zn1), EdgeKind)
 
     @parameterized.expand(
         [
@@ -386,15 +467,29 @@ class TestZephyrNode(unittest.TestCase):
     def test_sub(self, a, b, expected):
         self.assertEqual(a - b, expected)
 
+    @parameterized.expand(
+        [
+            (ZephyrNode((7, 4), ZephyrShape(6)), ZephyrNode((5, 2), ZephyrShape(6))),
+            (ZephyrNode((5, 2), ZephyrShape(6)), ZephyrNode((7, 4), ZephyrShape(6))),
+            (ZephyrNode((5, 2), ZephyrShape(6)), ZephyrNode((5, 2), ZephyrShape(6))),
+            (ZephyrNode((1, 12), ZephyrShape(6)), ZephyrNode((3, 10), ZephyrShape(6))),
+        ]
+    )
+    def test_sub_displaces_other_onto_self(self, a, b):
+        self.assertEqual(b + (a - b), a)
+
     def test_add_sub_inverse(self):
         n = ZephyrNode((5, 2), ZephyrShape(6))
         shift = ZephyrPlaneShift(2, 2)
         self.assertEqual((n + shift) - n, shift)
 
-    def test_ccoord_and_topology_coord_properties(self):
+    def test_coord_properties(self):
         zn = ZephyrNode((5, 2), ZephyrShape(6))
         self.assertEqual(zn.ccoord, ZephyrCartesianCoord(5, 2, _Quotient.QUOTIENT))
         self.assertEqual(zn.topology_coord, zn.zcoord)
+        self.assertEqual(zn.coord, zn.ccoord)
+        topology = ZephyrNode((11, 12, 4), ZephyrShape(t=6), coord_kind=CoordKind.TOPOLOGY)
+        self.assertEqual(topology.coord, topology.topology_coord)
 
     def test_four_tuple_coord(self):
         self.assertEqual(
@@ -435,3 +530,76 @@ class TestZephyrNode(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             a - b
+
+    @parameterized.expand(
+        [
+            (ZephyrNode((0, 1)), True),
+            (ZephyrNode((0, 1, 2), ZephyrShape(t=4)), False),
+        ]
+    )
+    def test_is_quotient(self, zn, expected) -> None:
+        self.assertEqual(zn.is_quotient(), expected)
+
+    def test_to_quotient(self) -> None:
+        zn = ZephyrNode((0, 1, 2), ZephyrShape(t=4))
+        self.assertEqual(zn.to_quotient(), ZephyrNode((0, 1)))
+
+    @parameterized.expand(
+        [
+            ((5, 2, 1), (6, 10), 1),
+            ((5, 2), (6, 2), 2),
+            ((1, 2), (1, 10), 10),
+        ]
+    )
+    def test_to_non_quotient(self, coord, shape, expected_len) -> None:
+        zn = ZephyrNode(coord, ZephyrShape(*shape) if len(coord) == 3 else None)
+        self.assertEqual(len(zn.to_non_quotient(ZephyrShape(*shape))), expected_len)
+
+    def test_str_repr(self) -> None:
+        zn = ZephyrNode((5, 2), ZephyrShape(6))
+        self.assertIsInstance(str(zn), str)
+        self.assertIn("ZephyrNode", repr(zn))
+
+    def test_lt_different_shapes_raises(self) -> None:
+        zn0 = ZephyrNode((5, 2), ZephyrShape(6))
+        zn1 = ZephyrNode((5, 2), ZephyrShape(4))
+        with self.assertRaises(TypeError):
+            zn0 < zn1
+
+    def test_eq_non_node(self) -> None:
+        self.assertNotEqual(ZephyrNode((5, 2), ZephyrShape(6)), 5)
+
+    def test_lt_non_node_raises(self) -> None:
+        with self.assertRaises(TypeError):
+            ZephyrNode((5, 2), ZephyrShape(6)) < 5
+
+    def test_is_neighbor_where(self) -> None:
+        zn = ZephyrNode((0, 1))
+        other = ZephyrNode((0, 3))
+        self.assertTrue(zn.is_neighbor(other, where=lambda c: c.y == 3))
+        self.assertFalse(zn.is_neighbor(other, where=lambda c: c.y == 99))
+
+    def test_incident_edges(self) -> None:
+        zn = ZephyrNode((5, 2), ZephyrShape(6))
+        edges = set(zn.incident_edges())
+        self.assertEqual(len(edges), zn.degree())
+        self.assertTrue(all(isinstance(e, ZephyrEdge) for e in edges))
+
+    def test_incident_edges_filtered(self) -> None:
+        zn = ZephyrNode((5, 2), ZephyrShape(6))
+        edges = set(zn.incident_edges(nbr_kind=EdgeKind.ODD))
+        self.assertEqual(len(edges), zn.degree(nbr_kind=EdgeKind.ODD))
+
+    def test_is_kind_neighbor_agrees_with_generators(self) -> None:
+        zn = ZephyrNode((5, 2), ZephyrShape(6))
+        for predicate, generator in (
+            ("is_internal_neighbor", "internal_neighbors"),
+            ("is_external_neighbor", "external_neighbors"),
+            ("is_odd_neighbor", "odd_neighbors"),
+        ):
+            neighbors = set(getattr(zn, generator)())
+            self.assertTrue(neighbors)
+            for other in neighbors:
+                self.assertTrue(getattr(zn, predicate)(other))
+            for other in set(zn.neighbors()) - neighbors:
+                self.assertFalse(getattr(zn, predicate)(other))

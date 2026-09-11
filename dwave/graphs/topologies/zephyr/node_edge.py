@@ -19,7 +19,7 @@ from itertools import product
 from typing import Callable, Generator
 
 from dwave.graphs.topologies.common.coords import CoordKind
-from dwave.graphs.topologies.common.node_edge import (ExternalNeighborsMixin,
+from dwave.graphs.topologies.common.node_edge import (EdgeKind, ExternalNeighborsMixin,
                                                       InternalNeighborsMixin, NodeKind,
                                                       OddNeighborsMixin, TopologyEdge, TopologyNode)
 from dwave.graphs.topologies.common.shape import _Infinite, _Quotient
@@ -38,6 +38,9 @@ class ZephyrEdge(TopologyEdge):
         y: Another endpoint of edge. Must have same shape as ``x``
         check_edge_valid: Flag to whether check the validity of values and types of ``x``, ``y``.
             Defaults to ``True``.
+        edge_kind: The kind of the edge, for callers that already know it.
+            If ``None``, the kind is derived from the endpoints on first
+            access to :attr:`edge_kind`. Defaults to ``None``.
 
     Raises:
         TypeError: If either of x or y is not an instance of :class:`ZephyrNode`.
@@ -50,9 +53,15 @@ class ZephyrEdge(TopologyEdge):
         >>> e = ZephyrEdge(ZephyrNode((3, 2)), ZephyrNode((7, 2)))
         >>> print(e)
         (((3, 2, <QUOTIENT>), (<INFINITE>, <QUOTIENT>)), ((7, 2, <QUOTIENT>), (<INFINITE>, <QUOTIENT>)))
-        Example 2:
+
+    Example 2:
+        Endpoints that are not neighbors in the topology raise an error.
+
         >>> from dwave.graphs import ZephyrNode, ZephyrEdge
-        >>> ZephyrEdge(ZephyrNode((2, 3)), ZephyrNode((6, 3)))  # raises error, since the two are not neighbors
+        >>> ZephyrEdge(ZephyrNode((2, 3)), ZephyrNode((6, 3)))
+        Traceback (most recent call last):
+            ...
+        ValueError: ... are not neighbors in zephyr
     """
 
     topology_name = "zephyr"
@@ -62,8 +71,55 @@ class ZephyrEdge(TopologyEdge):
         x: ZephyrNode,
         y: ZephyrNode,
         check_edge_valid: bool = True,
+        edge_kind: EdgeKind | None = None,
     ) -> None:
-        super().__init__(x, y, check_edge_valid)
+        super().__init__(x, y, check_edge_valid, edge_kind)
+
+
+def _neighbor_ccoords(
+    ccoord: ZephyrCartesianCoord,
+    shape: ZephyrShape,
+    edge_kind: EdgeKind,
+) -> Generator[ZephyrCartesianCoord, None, None]:
+    """Generates the Cartesian coordinates adjacent to ``ccoord`` by ``edge_kind``.
+
+    This is the single definition of Zephyr adjacency; :class:`ZephyrNode`'s
+    neighbor generators and
+    :class:`~dwave.graphs.topologies.zephyr.zephyr.Zephyr`'s edge generators
+    both derive from it.
+
+    Args:
+        ccoord: The Cartesian coordinate to generate the neighbors of.
+        shape: The shape of the Zephyr graph the coordinate belongs to.
+        edge_kind: The kind of coupler to follow.
+
+    Raises:
+        NotImplementedError: If ``edge_kind`` has no adjacency rule.
+
+    Yields:
+        The neighbors of ``ccoord`` that are consistent with ``shape``.
+    """
+    x, y, k = ccoord
+    match edge_kind:
+        case EdgeKind.INTERNAL:
+            # The four diagonally adjacent positions, across every tile index.
+            k_vals = [_Quotient.QUOTIENT] if shape.t is _Quotient.QUOTIENT else range(shape.t)
+            candidates = ((x + dx, y + dy, k_val)
+                          for dx, dy in product((-1, 1), (-1, 1)) for k_val in k_vals)
+        case EdgeKind.EXTERNAL | EdgeKind.ODD:
+            # Four (external) or two (odd) positions along the parallel direction.
+            step = 4 if edge_kind is EdgeKind.EXTERNAL else 2
+            offsets = ((0, -step), (0, step)) if x % 2 == 0 else ((-step, 0), (step, 0))
+            candidates = ((x + dx, y + dy, k) for dx, dy in offsets)
+        case _:
+            raise NotImplementedError(f"No Zephyr adjacency rule for {edge_kind}")
+
+    for new_x, new_y, k_val in candidates:
+        if new_x < 0 or new_y < 0:
+            continue
+        neighbor = ZephyrCartesianCoord(x=new_x, y=new_y, k=k_val, check_coord=False)
+        if neighbor.is_shape_consistent(shape):
+            yield neighbor
 
 
 class ZephyrNode(
@@ -82,8 +138,8 @@ class ZephyrNode(
         coord_kind: The kind of coordinate the node is represented with.
             If ``None``, it is inferred from ``coord``.
             Defaults to ``None``.
-        check_node_valid: Flag to whether check the validity of values and types of ``coord``, ``shape``.
-            Defaults to ``True``.
+        check_node_valid: Flag to whether check the validity of values and types of ``coord``
+            and ``shape``. Defaults to ``True``.
 
     ..note::
 
@@ -153,6 +209,8 @@ class ZephyrNode(
         """
         if shape is None:
             return ZephyrShape()
+        if isinstance(shape, ZephyrShape):
+            return shape
         try:
             return ZephyrShape(*shape, check_shape_valid=check_shape_valid)
         except (ValueError, TypeError) as e:
@@ -291,25 +349,31 @@ class ZephyrNode(
         Yields:
             Internal neighbors of the node when restricted by ``where``.
         """
-        x, y, _ = self._ccoord
-        k_vals = (
-            [_Quotient.QUOTIENT] if self._shape.t is _Quotient.QUOTIENT else range(self._shape.t)
-        )
-        for i, j, k in product((-1, 1), (-1, 1), k_vals):
-            new_x, new_y = x + i, y + j
-            if new_x < 0 or new_y < 0:
+        yield from self._neighbors_of_kind(EdgeKind.INTERNAL, where=where)
+
+    def _neighbors_of_kind(
+        self,
+        edge_kind: EdgeKind,
+        where: Callable[[ZephyrCartesianCoord | ZephyrCoord], bool] | None = None,
+    ) -> Generator[ZephyrNode, None, None]:
+        """Turns the coordinates from :func:`_neighbor_ccoords` into nodes.
+
+        Args:
+            edge_kind: The kind of coupler to follow.
+            where: A coordinate filter. Defaults to ``None``.
+
+        Yields:
+            The neighbors joined by ``edge_kind``, when restricted by ``where``.
+        """
+        for ccoord in _neighbor_ccoords(self._ccoord, self._shape, edge_kind):
+            coord = ccoord.convert(self._coord_kind)
+            if (where is not None) and (not where(coord)):
                 continue
-            ccoord = ZephyrCartesianCoord(x=new_x, y=new_y, k=k, check_coord=False)
-            # Check ccoord is consistent with shape
-            if ccoord.is_shape_consistent(self._shape):
-                coord = ccoord.convert(self._coord_kind)
-                if (where is not None) and (not where(coord)):
-                    continue
-                yield ZephyrNode(
-                    coord=coord,
-                    shape=self._shape,
-                    coord_kind=self._coord_kind,
-                )
+            yield ZephyrNode(
+                coord=coord,
+                shape=self._shape,
+                coord_kind=self._coord_kind,
+            )
 
     def external_neighbors(
         self,
@@ -325,23 +389,7 @@ class ZephyrNode(
         Yields:
             External neighbors of node when restricted by ``where``.
         """
-        x, y, k = self._ccoord
-        changing_index = 1 if x % 2 == 0 else 0
-        for s in [-4, 4]:
-            new_x = x + s if changing_index == 0 else x
-            new_y = y + s if changing_index == 1 else y
-            if new_x < 0 or new_y < 0:
-                continue
-            ccoord = ZephyrCartesianCoord(x=new_x, y=new_y, k=k, check_coord=True)
-            if ccoord.is_shape_consistent(self._shape):
-                coord = ccoord.convert(self._coord_kind)
-                if (where is not None) and (not where(coord)):
-                    continue
-                yield ZephyrNode(
-                    coord=coord,
-                    shape=self._shape,
-                    coord_kind=self._coord_kind,
-                )
+        yield from self._neighbors_of_kind(EdgeKind.EXTERNAL, where=where)
 
     def odd_neighbors(
         self,
@@ -357,23 +405,7 @@ class ZephyrNode(
         Yields:
             Odd neighbors of node when restricted by ``where``.
         """
-        x, y, k = self._ccoord
-        changing_index = 1 if x % 2 == 0 else 0
-        for s in [-2, 2]:
-            new_x = x + s if changing_index == 0 else x
-            new_y = y + s if changing_index == 1 else y
-            if new_x < 0 or new_y < 0:
-                continue
-            ccoord = ZephyrCartesianCoord(x=new_x, y=new_y, k=k, check_coord=True)
-            if ccoord.is_shape_consistent(self._shape):
-                coord = ccoord.convert(self._coord_kind)
-                if (where is not None) and (not where(coord)):
-                    continue
-                yield ZephyrNode(
-                    coord=coord,
-                    shape=self._shape,
-                    coord_kind=self._coord_kind,
-                )
+        yield from self._neighbors_of_kind(EdgeKind.ODD, where=where)
 
     def __add__(self, shift: ZephyrPlaneShift | tuple[int, int]) -> ZephyrNode:
         """Shifts the node in the Zephyr Cartesian plane.
@@ -410,10 +442,19 @@ class ZephyrNode(
 
         Raises:
             ValueError: If there is no valid shift in Zephyr Cartesian plane
-                that moves the node to the other node.
+                that moves the other node to this node.
 
         Returns:
-            The displacement that when added to the node moves it to the other node.
+            The displacement that when added to the other node moves it to
+            this node; that is, ``other + (self - other) == self``.
+
+        Example:
+            >>> from dwave.graphs import ZephyrNode, ZephyrShape
+            >>> a, b = ZephyrNode((7, 4), ZephyrShape(6)), ZephyrNode((5, 2), ZephyrShape(6))
+            >>> a - b
+            ZephyrPlaneShift(2, 2)
+            >>> b + (a - b) == a
+            True
         """
         x_shift: int = self._ccoord.x - other._ccoord.x
         y_shift: int = self._ccoord.y - other._ccoord.y

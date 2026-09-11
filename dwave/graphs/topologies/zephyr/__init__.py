@@ -18,3 +18,20 @@ from dwave.graphs.topologies.zephyr.node_edge import *
 from dwave.graphs.topologies.zephyr.planeshift import *
 from dwave.graphs.topologies.zephyr.shape import *
 from dwave.graphs.topologies.zephyr.zephyr import *
+
+# Explicit re-exports. Without this, ``from ... import *`` on this package would
+# also export the submodule names bound by the imports above, and the ``zephyr``
+# submodule would shadow this package in ``dwave.graphs.topologies``.
+__all__ = [
+    "Zephyr",
+    "ZephyrCartesianCoord",
+    "ZephyrCoord",
+    "ZephyrEdge",
+    "ZephyrNode",
+    "ZephyrPlaneShift",
+    "ZephyrShape",
+    "zephyr_coordinates",
+    "zephyr_graph",
+    "zephyr_sublattice_mappings",
+    "zephyr_torus",
+]

@@ -95,11 +95,17 @@ class Coord(ABC):
         """
 
     @abstractmethod
-    def convert(self, coord_kind: CoordKind) -> Coord:
+    def convert(
+        self,
+        coord_kind: CoordKind,
+        shape: TopologyShape | None = None,
+        **kwargs,
+    ) -> Coord | int:
         """Converts the coordinate to other kinds of coordinate in the same topology.
 
         Args:
             coord_kind: The coordinate kind to convert the coordinate to.
+            shape: The topology shape.
 
         Returns:
             The converted coordinate.

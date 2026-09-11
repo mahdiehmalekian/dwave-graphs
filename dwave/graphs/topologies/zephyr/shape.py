@@ -65,7 +65,7 @@ class ZephyrShape(TopologyShape):
 
     def to_tuple(self) -> tuple[int | _Infinite, int | _Quotient]:
         """Returns the tuple that identifies the Zephyr shape."""
-        return (self.m, self.t)
+        return (self._m, self._t)
 
     def to_quotient(self) -> ZephyrShape:
         """Converts the shape to its corresponding quotient tile size shape."""

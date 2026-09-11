@@ -18,3 +18,25 @@ from dwave.graphs.topologies.common.node_edge import *
 from dwave.graphs.topologies.common.planeshift import *
 from dwave.graphs.topologies.common.shape import *
 from dwave.graphs.topologies.common.topology import *
+
+# Explicit re-exports. Without this, ``from ... import *`` on this package would
+# also export the submodule names bound by the imports above, and the ``common``
+# submodule would shadow this package in ``dwave.graphs.topologies``.
+__all__ = [
+    "Coord",
+    "CoordKind",
+    "Edge",
+    "EdgeKind",
+    "ExternalNeighborsMixin",
+    "InternalNeighborsMixin",
+    "NeighborContributorMixin",
+    "NodeKind",
+    "OddNeighborsMixin",
+    "Topology",
+    "TopologyEdge",
+    "TopologyNode",
+    "TopologyPlaneShift",
+    "TopologyShape",
+    "_Infinite",
+    "_Quotient",
+]

@@ -99,6 +99,21 @@ class TestZephyrShape(TestCase):
     def test_is_infinite(self, shape, expected):
         self.assertEqual(ZephyrShape(*shape).is_infinite(), expected)
 
+    @parameterized.expand([("m",), ("t",)])
+    def test_shape_values_are_read_only(self, attr):
+        shape = ZephyrShape(2, 4)
+        with self.assertRaises(AttributeError):
+            setattr(shape, attr, 7)
+
+    def test_cached_tuple_cannot_go_stale(self):
+        shape = ZephyrShape(2, 4)
+        hash(shape)
+        with self.assertRaises(AttributeError):
+            shape.m = 7
+        self.assertEqual(shape.to_tuple(), tuple(shape))
+        self.assertEqual(shape, ZephyrShape(2, 4))
+        self.assertNotEqual(shape, ZephyrShape(7, 4))
+
 
 class TestZephyrCartesianCoord(TestCase):
     @parameterized.expand(
@@ -223,6 +238,12 @@ class TestZephyrCartesianCoord(TestCase):
 
     def test_cross_type_eq_is_notimplemented(self):
         self.assertNotEqual(ZephyrCartesianCoord(0, 1, 2), (0, 1, 2))
+
+    @parameterized.expand([("x",), ("y",), ("k",)])
+    def test_coord_values_are_read_only(self, attr):
+        coord = ZephyrCartesianCoord(0, 1, 2)
+        with self.assertRaises(AttributeError):
+            setattr(coord, attr, 7)
 
     def test_to_quotient(self):
         self.assertEqual(
@@ -357,6 +378,21 @@ class TestZephyrCoord(TestCase):
         self.assertIs(coord.__eq__(other), NotImplemented)
         self.assertIs(coord.__lt__(other), NotImplemented)
 
+    @parameterized.expand([("u",), ("w",), ("k",), ("j",), ("z",)])
+    def test_coord_values_are_read_only(self, attr):
+        coord = ZephyrCoord(0, 1, 2, 0, 3)
+        with self.assertRaises(AttributeError):
+            setattr(coord, attr, 7)
+
+    def test_cached_tuple_cannot_go_stale(self):
+        coord = ZephyrCoord(0, 1, 2, 0, 3)
+        hash(coord)
+        with self.assertRaises(AttributeError):
+            coord.w = 7
+        self.assertEqual(coord.to_tuple(), tuple(coord))
+        self.assertEqual(coord, ZephyrCoord(0, 1, 2, 0, 3))
+        self.assertNotEqual(coord, ZephyrCoord(0, 7, 2, 0, 3))
+
 
 class TestConvertToLinear(TestCase):
 
@@ -365,7 +401,6 @@ class TestConvertToLinear(TestCase):
         coords = zephyr_coordinates(m, t)
         zc = ZephyrCoord(0, 1, 2, 1, 0)
         expected = coords.zephyr_to_linear(zc.to_tuple())
-        # This will surface the is_quoutient typo as AttributeError today.
         self.assertEqual(zc.convert(CoordKind.LINEAR, ZephyrShape(m, t)), expected)
 
     def test_cartesian_to_linear_matches_converter(self):
@@ -386,9 +421,55 @@ class TestConvertToLinear(TestCase):
             with self.assertRaises(ValueError):
                 ZephyrCoord(0, 1, 2, 1, 0).convert(CoordKind.LINEAR, shape)
 
+    @parameterized.expand(
+        [
+            ((0, 5, 0, 0, 0), (2, 4),),
+            ((0, 0, 0, 0, 2), (2, 4),),
+            ((0, 0, 4, 0, 0), (2, 4),),
+        ]
+    )
+    def test_linear_rejects_out_of_shape_zephyr_coord(self, uwkjz, shape):
+        coord = ZephyrCoord(*uwkjz)
+        self.assertFalse(coord.is_shape_consistent(ZephyrShape(*shape)))
+        with self.assertRaises(ValueError):
+            coord.convert(CoordKind.LINEAR, ZephyrShape(*shape))
+
+    @parameterized.expand(
+        [
+            ((17, 2, 1), (2, 4),),
+            ((0, 17, 1),(2, 4),),
+            ((0, 1, 4),(2, 4),),
+        ]
+    )
+    def test_linear_rejects_out_of_shape_cartesian_coord(self, xyk, shape):
+        coord = ZephyrCartesianCoord(*xyk)
+        self.assertFalse(coord.is_shape_consistent(ZephyrShape(*shape)))
+        with self.assertRaises(ValueError):
+            coord.convert(CoordKind.LINEAR, ZephyrShape(*shape))
+
+    def test_linear_rejects_quotient_coord(self):
+        for coord in (
+            ZephyrCoord(0, 1, _Quotient.QUOTIENT, 1, 0),
+            ZephyrCartesianCoord(0, 1, _Quotient.QUOTIENT),
+        ):
+            with self.assertRaises(ValueError):
+                coord.convert(CoordKind.LINEAR, ZephyrShape(2, 4))
+
+    def test_linear_in_shape_coords_are_unique_and_contiguous(self):
+        m, t = 2, 4
+        shape = ZephyrShape(m, t)
+        indices = [
+            ZephyrCoord(u, w, k, j, z).convert(CoordKind.LINEAR, shape)
+            for u in range(2)
+            for w in range(2 * m + 1)
+            for k in range(t)
+            for j in range(2)
+            for z in range(m)
+        ]
+        self.assertEqual(sorted(indices), list(range(4 * t * m * (2 * m + 1))))
+
 
 class TestZephyrCoordinatesConverters(TestCase):
-
     @parameterized.expand([(2, 4), (3, 2), (1, 6)])
     def test_linear_zephyr_roundtrip(self, m, t):
         coords = zephyr_coordinates(m, t)

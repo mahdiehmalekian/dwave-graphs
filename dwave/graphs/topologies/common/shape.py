@@ -56,6 +56,9 @@ class TopologyShape(ABC):
         t: The tile size of topology. Defaults to ``_Quotient.QUOTIENT``.
         check_shape_valid: Flag to whether to check the
             parameters are valid on instantiation. Defaults to ``True``.
+
+    The shape parameters are read-only; the class is hashable and its
+    ordering, equality and hash are fixed at construction.
     """
 
     #: Name of the topology the class is designed for. Must be set by
@@ -72,8 +75,19 @@ class TopologyShape(ABC):
     ) -> None:
         if check_shape_valid:
             self._args_are_valid(m, t, *args, **kwargs)
-        self.m = m
-        self.t = t
+
+        self._m: int | _Infinite = m
+        self._t: int | _Quotient = t
+
+    @property
+    def m(self) -> int | _Infinite:
+        """The grid size of the topology."""
+        return self._m
+
+    @property
+    def t(self) -> int | _Quotient:
+        """The tile size of the topology."""
+        return self._t
 
     @abstractmethod
     def _args_are_valid(self, m: int | _Infinite, t: int | _Quotient, *args, **kwargs) -> None:

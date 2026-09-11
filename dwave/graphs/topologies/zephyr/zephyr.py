@@ -14,41 +14,49 @@
 
 
 from itertools import product
-from typing import Generator, Iterable
+from typing import Callable, Iterable
 
 import networkx as nx
 
 from dwave.graphs.topologies.common import CoordKind, EdgeKind, Topology, _Infinite, _Quotient
 from dwave.graphs.topologies.zephyr.coords import ZephyrCartesianCoord, ZephyrCoord
 from dwave.graphs.topologies.zephyr.graphs import zephyr_graph
-from dwave.graphs.topologies.zephyr.node_edge import ZephyrEdge, ZephyrNode
-from dwave.graphs.topologies.zephyr.planeshift import ZephyrPlaneShift
+from dwave.graphs.topologies.zephyr.node_edge import ZephyrEdge, ZephyrNode, _neighbor_ccoords
 from dwave.graphs.topologies.zephyr.shape import ZephyrShape
 
 __all__ = ["Zephyr"]
 
 
 class Zephyr(Topology):
-    """A class to access various classes associated with D-Wave's Zephyr topology."""
+    """A class to access various classes associated with D-Wave's Zephyr topology.
 
-    _planeshift_class = ZephyrPlaneShift
-    _shape_class = ZephyrShape
-    _node_class = ZephyrNode
-    _edge_class = ZephyrEdge
+    Args:
+        coord_kind: The kind of coordinate nodes and edge endpoints are
+            represented with whenever :meth:`nodes` and :meth:`edges` are
+            called without an explicit ``coord_kind``.
+            Defaults to ``CoordKind.TOPOLOGY``.
+
+    Raises:
+        NotImplementedError: If ``coord_kind`` is :attr:`CoordKind.LINEAR`.
+        ValueError: If ``coord_kind`` is not a valid coordinate kind.
+    """
 
     def __init__(self, coord_kind: CoordKind = CoordKind.TOPOLOGY):
 
         match coord_kind:
-            case CoordKind.TOPOLOGY:
-                self._coord_class = ZephyrCoord
-            case CoordKind.CARTESIAN:
-                self._coord_class = ZephyrCartesianCoord
+            case CoordKind.TOPOLOGY | CoordKind.CARTESIAN:
+                self._coord_kind = coord_kind
             case CoordKind.LINEAR:
                 raise NotImplementedError("Zephyr does not support linear coordinates")
             case _:
                 raise ValueError("invalid coord kind")
 
         super().__init__()
+
+    @property
+    def coord_kind(self) -> CoordKind:
+        """The default kind of coordinate nodes and edge endpoints are represented with."""
+        return self._coord_kind
 
     @staticmethod
     def create_graph(
@@ -110,27 +118,33 @@ class Zephyr(Topology):
             try:
                 shape = ZephyrShape(*shape)
             except (ValueError, TypeError):
-                raise ValueError(
-                    f"{shape} cannot be an instance of ZephyrShape")
+                raise ValueError(f"{shape} cannot be an instance of ZephyrShape")
         return shape
 
     def nodes(
         self,
         shape: ZephyrShape | tuple[int | _Infinite, int | _Quotient],
-        coord_kind: CoordKind = CoordKind.CARTESIAN,
+        coord_kind: CoordKind | None = None,
     ) -> set[ZephyrNode]:
         """Returns the nodes of a Zephyr graph.
 
         Args:
             shape: The shape of the Zephyr graph.
-            coord_kind: The kind of coordinate the edges endpoints are represented with.
-                Defaults to ``CoordKind.CARTESIAN``.
+            coord_kind: The kind of coordinate the nodes are represented with.
+                If ``None``, the kind the topology was constructed with is
+                used. Defaults to ``None``.
+
         Raises:
+            NotImplementedError: If ``coord_kind`` is :attr:`CoordKind.LINEAR`.
+            ValueError: If ``shape`` is not a valid Zephyr shape.
             ValueError: If the grid size of the shape is ``_Infinite.INFINITE``.
 
         Returns:
             The nodes of the Zephyr graph.
         """
+        if coord_kind is None:
+            coord_kind = self._coord_kind
+
         if coord_kind is CoordKind.LINEAR:
             raise NotImplementedError("Zephyr does not support linear coordinates")
 
@@ -163,7 +177,8 @@ class Zephyr(Topology):
         self,
         shape: ZephyrShape | tuple[int | _Infinite, int | _Quotient],
         edge_kind: EdgeKind | Iterable[EdgeKind] | None = None,
-        coord_kind: CoordKind = CoordKind.CARTESIAN,
+        where: Callable[[ZephyrCartesianCoord | ZephyrCoord], bool] | None = None,
+        coord_kind: CoordKind | None = None,
     ) -> set[ZephyrEdge]:
         """Returns the edges of a Zephyr graph with a shape and optional
             coordinate and edge kind.
@@ -172,12 +187,23 @@ class Zephyr(Topology):
             shape: The shape of Zephyr graph.
             edge_kind: Edge kind filter. Restricts edges to the given edge kind(s).
                 If ``None``, no filtering is applied. Defaults to ``None``.
+            where: A coordinate filter. Restricts edges to those whose both
+                endpoint coordinates satisfy it. If ``None``, no filtering is
+                applied. Defaults to ``None``.
             coord_kind: The kind of coordinate the edges endpoints are represented with.
-                Defaults to ``CoordKind.CARTESIAN``.
+                If ``None``, the kind the topology was constructed with is
+                used. Defaults to ``None``.
+
+        Raises:
+            NotImplementedError: If ``coord_kind`` is :attr:`CoordKind.LINEAR`.
+            ValueError: If ``shape`` is not a valid Zephyr shape.
+            ValueError: If the grid size of the shape is ``_Infinite.INFINITE``.
 
         Returns:
             The edges of the Zephyr graph.
         """
+        if coord_kind is None:
+            coord_kind = self._coord_kind
 
         if coord_kind is CoordKind.LINEAR:
             raise NotImplementedError("Zephyr does not support linear coordinates")
@@ -193,125 +219,22 @@ class Zephyr(Topology):
             _edge_kinds = {edge_kind}
         else:
             _edge_kinds = set(edge_kind)
+        kinds = [
+            kind
+            for kind in (EdgeKind.INTERNAL, EdgeKind.EXTERNAL, EdgeKind.ODD)
+            if kind in _edge_kinds
+        ]
+        # Each edge is reached from both of its endpoints; the set dedupes them.
         edges = set()
-        if EdgeKind.INTERNAL in _edge_kinds:
-            edges.update(self._internal_edges(shape, coord_kind))
-        if EdgeKind.EXTERNAL in _edge_kinds:
-            edges.update(self._external_edges(shape, coord_kind))
-        if EdgeKind.ODD in _edge_kinds:
-            edges.update(self._odd_edges(shape, coord_kind))
+        for node in self.nodes(shape, coord_kind):
+            for kind in kinds:
+                for ccoord in _neighbor_ccoords(node.ccoord, shape, kind):
+                    neighbor = ZephyrNode(
+                        ccoord, shape=shape, coord_kind=coord_kind, check_node_valid=False
+                    )
+                    edges.add(ZephyrEdge(node, neighbor, check_edge_valid=False, edge_kind=kind))
+
+        if where is not None:
+            edges = {edge for edge in edges if all(where(node.coord) for node in edge)}
 
         return edges
-
-    def _k_values(self, t: int | _Quotient) -> Iterable[int | _Quotient]:
-        """Gives the ``k`` values of a tile with tile size ``t``.
-
-        Args:
-            t: The tile size of the Zephyr graph.
-
-        Returns:
-            The ``k`` values within a tile.
-        """
-        return [_Quotient.QUOTIENT] if t is _Quotient.QUOTIENT else range(t)
-
-    def _internal_edges(
-        self,
-        shape: ZephyrShape,
-        coord_kind: CoordKind,
-    ) -> Generator[ZephyrEdge, None, None]:
-        """Generates the internal edges of a Zephyr graph.
-
-        Args:
-            shape: The shape of the Zephyr graph.
-            coord_kind: The kind of coordinate the edges endpoints are represented with.
-
-        Yields:
-            The internal edges of the Zephyr graph.
-        """
-        m, t = shape
-        k_vals = self._k_values(t)
-        for x in range(0, 4 * m, 2):
-            for y in range(1, 4 * m, 2):
-                square = [(x, y), (x + 1, y - 1), (x + 2, y),
-                          (x + 1, y + 1), (x, y)]
-                for i, sq_e in enumerate(square):
-                    if i == 4:
-                        continue
-                    for k1, k2 in product(k_vals, k_vals):
-                        coord1 = ZephyrCartesianCoord(*sq_e, k=k1)
-                        node1 = ZephyrNode(
-                            coord1, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        coord2 = ZephyrCartesianCoord(*square[i + 1], k=k2)
-                        node2 = ZephyrNode(
-                            coord2, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        yield ZephyrEdge(x=node1, y=node2, check_edge_valid=False)
-
-    def _external_edges(
-        self,
-        shape: ZephyrShape,
-        coord_kind: CoordKind,
-    ) -> Generator[ZephyrEdge, None, None]:
-        """Generates the external edges of a Zephyr graph.
-
-        Args:
-            shape: The shape of the Zephyr graph.
-            coord_kind: The kind of coordinate the edges endpoints are represented with.
-
-        Yields:
-            The external edges of the Zephyr graph.
-        """
-        m, t = shape
-        k_vals = self._k_values(t)
-        for x in range(1, 4 * m - 4, 2):
-            for y in range(0, 4 * m + 1, 2):
-                ccoord = (x, y)
-                ccoord_ext = (x + 4, y)
-                for k in k_vals:
-                    for step in (-1, 1):
-                        coord1 = ZephyrCartesianCoord(
-                            *ccoord[::step], k, check_coord=False)
-                        node1 = ZephyrNode(
-                            coord1, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        coord2 = ZephyrCartesianCoord(
-                            *ccoord_ext[::step], k, check_coord=False)
-                        node2 = ZephyrNode(
-                            coord2, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        yield ZephyrEdge(x=node1, y=node2, check_edge_valid=False)
-
-    def _odd_edges(
-        self,
-        shape: ZephyrShape,
-        coord_kind: CoordKind,
-    ) -> Generator[ZephyrEdge, None, None]:
-        """Generates the odd edges of a Zephyr graph.
-
-        Args:
-            shape: The shape of the Zephyr graph.
-            coord_kind: The kind of coordinate the edges endpoints are represented with.
-
-        Yields:
-            The odd edges of the Zephyr graph.
-        """
-        m, t = shape
-        k_vals = self._k_values(t)
-        for x in range(1, 4 * m - 2, 2):
-            for y in range(0, 4 * m + 1, 2):
-                ccoord = (x, y)
-                ccoord_odd = (x + 2, y)
-                for k in k_vals:
-                    for step in (-1, 1):
-                        coord1 = ZephyrCartesianCoord(
-                            *ccoord[::step], k, check_coord=False)
-                        node1 = ZephyrNode(
-                            coord1, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        coord2 = ZephyrCartesianCoord(
-                            *ccoord_odd[::step], k, check_coord=False)
-                        node2 = ZephyrNode(
-                            coord2, shape=shape, coord_kind=coord_kind, check_node_valid=False
-                        )
-                        yield ZephyrEdge(x=node1, y=node2, check_edge_valid=False)

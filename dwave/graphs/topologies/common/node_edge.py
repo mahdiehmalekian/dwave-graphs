@@ -137,8 +137,9 @@ class TopologyEdge(ABC, Edge):
         x: TopologyNode,
         y: TopologyNode,
         check_edge_valid: bool = True,
+        edge_kind: EdgeKind | None = None,
     ) -> None:
-        self._edge_kind = None
+        self._edge_kind = edge_kind
         if check_edge_valid:
             self._check_edge_valid(x, y)
         super().__init__(x, y)
@@ -329,13 +330,14 @@ class TopologyNode(ABC):
     @property
     def direction(self) -> int:
         """The direction of the qubit the node is representing."""
-        match self.node_kind:
+        node_kind = self.node_kind
+        match node_kind:
             case NodeKind.VERTICAL:
                 return 0
             case NodeKind.HORIZONTAL:
                 return 1
-
-        raise AssertionError(f"Unhandled NodeKind value: {_node_kind}")
+            case _:
+                raise AssertionError(f"Unhandled NodeKind value: {node_kind}")
 
     def is_quotient(self) -> bool:
         """Tells if the node is quotient."""
@@ -367,7 +369,7 @@ class TopologyNode(ABC):
 
     @property
     def coord(self) -> Coord:
-        """Coordinate of the node, expressed in the coordinate system the node is represented with to the user."""
+        """Coordinate of the node, in the coordinate system it is represented with to the user."""
         return (self._ccoord).convert(self.coord_kind)
 
     def is_vertical(self) -> bool:
@@ -387,11 +389,19 @@ class TopologyNode(ABC):
         Args:
             other: Another topology node.
 
+        Raises:
+            TypeError: If ``other`` is not of the same type as the node.
+
         Returns:
-            The edge kind between the two nodes in perfect yield topology.
+            The edge kind between the two nodes in perfect yield topology,
+            or :attr:`EdgeKind.INVALID` if the two nodes do not form a valid
+            edge of the topology.
         """
         if type(self) is not type(other):
-            return NotImplemented
+            raise TypeError(
+                f"Expected an instance of {type(self).__name__}, "
+                f"got {type(other).__name__}"
+            )
         try:
             return self.associated_topology_edge(self, other).edge_kind
         except ValueError:
@@ -415,6 +425,30 @@ class TopologyNode(ABC):
         Yields:
             Neighbors of the node when restricted by ``nbr_kind`` and ``where``.
         """
+        for _, neighbor in self._neighbors_by_kind(nbr_kind=nbr_kind, where=where):
+            yield neighbor
+
+    def _neighbors_by_kind(
+        self,
+        nbr_kind: EdgeKind | Iterable[EdgeKind] | None = None,
+        where: Callable[[Coord], bool] | None = None,
+    ) -> Generator[tuple[EdgeKind, TopologyNode], None, None]:
+        """Generates ``(edge kind, neighbor)`` pairs for the node.
+
+        The kind is known here because each neighbor is produced by the
+        contributor method registered for that kind, so callers that need it
+        need not re-derive it from the endpoints.
+
+        Args:
+            nbr_kind:
+                Edge kind filter. Restricts yielded neighbors to those connected
+                by the given edge kind(s).
+                If ``None``, no filtering is applied. Defaults to ``None``.
+            where: A coordinate filter. Defaults to ``None``.
+
+        Yields:
+            The kind of edge to each neighbor, paired with the neighbor.
+        """
 
         edgekind_cls_map = self.supported_edgekinds()
 
@@ -431,7 +465,8 @@ class TopologyNode(ABC):
             else:
                 method_name = EDGE_KINDS_CONTRIBUTOR_MAP[kind]
                 method = getattr(self, method_name)
-                yield from method(where=where)
+                for neighbor in method(where=where):
+                    yield kind, neighbor
 
     def is_neighbor(
         self,
@@ -474,8 +509,13 @@ class TopologyNode(ABC):
         Returns:
             List of edges incident with self when restricted by ``nbr_kind`` and ``where``.
         """
-        for v in self.neighbors(nbr_kind=nbr_kind, where=where):
-            yield self.associated_topology_edge(self, v)
+        # Both endpoints come from ``neighbors()``, so every edge is valid by
+        # construction. Validating again would re-derive the neighbors of each
+        # endpoint, making this quadratic in the degree of the node. The kind
+        # is already known here, so it is passed on rather than re-derived on
+        # first access to :attr:`TopologyEdge.edge_kind`.
+        for kind, v in self._neighbors_by_kind(nbr_kind=nbr_kind, where=where):
+            yield self.associated_topology_edge(self, v, check_edge_valid=False, edge_kind=kind)
 
     def degree(
         self,
@@ -486,8 +526,8 @@ class TopologyNode(ABC):
 
         Args:
             nbr_kind:
-                Edge kind filter. Restricts counting the neighbors to those connected by the given edge kind(s).
-                If ``None``, no filtering is applied. Defaults to ``None``.
+                Edge kind filter. Restricts counting the neighbors to those connected by the
+                given edge kind(s). If ``None``, no filtering is applied. Defaults to ``None``.
             where:
                 A coordinate filter. Defaults to ``None``.
 
@@ -515,7 +555,8 @@ class TopologyNode(ABC):
             other: The node to find the displacement with.
 
         Returns:
-            The displacement whose application to the node moves it to the other node.
+            The displacement whose application to the other node moves it to
+            this node; that is, ``other + (self - other) == self``.
         """
 
     def __eq__(self, other: object) -> bool:
